@@ -10,29 +10,56 @@ It is strictly **read-only**: `/inspect` never modifies your conversation histor
 
 ## Install
 
-This is a Code Puppy plugin. Clone it into your Code Puppy **user plugins** directory:
+This is a Code Puppy plugin. Plugins live in `~/.code_puppy/plugins/`. Install the
+latest release straight into that directory, then restart Code Puppy.
+
+### macOS / Linux
 
 ```bash
-git clone https://github.com/weegens-aaron/inspect-history.git \
-  ~/.code_puppy/plugins/inspect-history
+curl -fsSL https://github.com/weegens-aaron/inspect-history/releases/latest/download/inspect-history.zip -o /tmp/inspect-history.zip && unzip -o /tmp/inspect-history.zip -d ~/.code_puppy/plugins/
 ```
 
-Then restart Code Puppy. The `/inspect` command (alias `/i`) is now available.
+### Windows (PowerShell)
 
-To update later:
+```powershell
+Invoke-WebRequest -Uri https://github.com/weegens-aaron/inspect-history/releases/latest/download/inspect-history.zip -OutFile $env:TEMP\inspect-history.zip; Expand-Archive -Force $env:TEMP\inspect-history.zip -DestinationPath ~\.code_puppy\plugins\
+```
+
+### Manual download (any platform, no CLI)
+
+1. Go to the [**Releases** page](https://github.com/weegens-aaron/inspect-history/releases/latest).
+2. Download **`inspect-history.zip`** from the latest release's assets.
+3. Extract it into `~/.code_puppy/plugins/` (macOS/Linux) or `~\.code_puppy\plugins\` (Windows).
+
+The zip contains a single top-level `inspect_history/` folder, so every path above
+results in `…/plugins/inspect_history/…` — extract, don't nest.
+
+After installing, **restart Code Puppy**. The `/inspect` command (alias `/i`) is now available.
+
+### Verify your download (optional but recommended)
+
+Every release publishes an `inspect-history.zip.sha256` asset next to the zip. **macOS / Linux**, after running the install one-liner (which leaves the zip at `/tmp/inspect-history.zip`):
 
 ```bash
-cd ~/.code_puppy/plugins/inspect-history && git pull
+curl -fsSL https://github.com/weegens-aaron/inspect-history/releases/latest/download/inspect-history.zip.sha256 -o /tmp/inspect-history.zip.sha256
+( cd /tmp && shasum -a 256 -c inspect-history.zip.sha256 )   # prints "inspect-history.zip: OK"
 ```
 
-To uninstall, delete the directory and restart Code Puppy:
+(`sha256sum -c inspect-history.zip.sha256` works on distros that ship `sha256sum`.)
 
-```bash
-rm -rf ~/.code_puppy/plugins/inspect-history
-```
+### Upgrade / Uninstall
 
-> **Note:** the plugin directory must be named `inspect-history` (hyphenated). The
-> modules use relative imports, which Code Puppy's plugin loader resolves correctly
+| Action | macOS / Linux | Windows |
+|--------|---------------|---------|
+| **Upgrade** | Re-run the install line — it always pulls the latest release. | Re-run the install line. |
+| **Uninstall** | `rm -rf ~/.code_puppy/plugins/inspect_history` | `Remove-Item -Recurse -Force ~\.code_puppy\plugins\inspect_history` |
+
+Every command uses the stable `/releases/latest/download/inspect-history.zip` URL — a
+fixed asset name on the latest release — so nothing ever needs version-editing.
+
+> The plugin's modules use relative imports, which Code Puppy's plugin loader resolves
+> correctly whether the directory is named `inspect_history` (the release zip) or
+> `inspect-history` (a git clone).
 > under the hyphenated package name.
 
 ---
@@ -86,6 +113,25 @@ python -m pytest -q
 
 The test suite registers the package as `inspect_history` via `tests/conftest.py`, so it
 runs the same way Code Puppy loads the plugin at runtime.
+
+### Releasing
+
+`scripts/build-release.sh` builds the distributable zip from an explicit allowlist
+(runtime `.py` files + `README.md` + `LICENSE`):
+
+```bash
+./scripts/build-release.sh
+```
+
+It reads `__version__` from `__init__.py` (the single source of truth), writes both a
+stable `dist/inspect-history.zip` and a versioned `dist/inspect-history-v<version>.zip`
+(each with a `.sha256` sidecar), and self-checks by extracting the zip and importing the
+package. To cut a release, bump `__version__`, run the script, then upload every
+`dist/` artifact:
+
+```bash
+gh release create v<version> dist/inspect-history*.zip dist/inspect-history*.zip.sha256
+```
 
 Project layout:
 
