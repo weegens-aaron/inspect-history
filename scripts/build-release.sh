@@ -152,6 +152,54 @@ sha256_in_dist "$(basename "${STABLE_ZIP}")"
 sha256_in_dist "$(basename "${VERSIONED_ZIP}")"
 echo "    wrote $(basename "${STABLE_ZIP}").sha256 and $(basename "${VERSIONED_ZIP}").sha256"
 
+# --- 6b. Scaffold dist/RELEASE_NOTES.md with the install block PRE-FILLED.
+#         The GitHub release page is often the ONLY page a user ever sees, so
+#         every release's notes MUST carry install instructions. Generating
+#         them here makes that a default the publisher cannot forget: just fill
+#         in the "What's changed" section and pass the file to
+#         `gh release create --notes-file`. NOTE: the install steps are mirrored
+#         from README.md's Install section — keep the two in sync on any change
+#         to the install flow. -------------------------------------------------
+RELEASE_NOTES="${DIST_DIR}/RELEASE_NOTES.md"
+echo "==> Scaffolding release notes (${RELEASE_NOTES})"
+# Quoted heredoc => ZERO shell interpretation (backticks, $, and trailing
+# backslashes all stay literal). The version is injected afterwards via the
+# __VERSION__ placeholder so we never have to escape anything here.
+cat > "${RELEASE_NOTES}" <<'NOTES'
+## What's changed
+
+_TODO: summarize the changes in v__VERSION__ before publishing._
+
+## Install
+
+This is a Code Puppy plugin. Plugins live in `~/.code_puppy/plugins/`. Install
+straight into that directory, then **restart Code Puppy**.
+
+**macOS / Linux**
+
+```bash
+curl -fsSL https://github.com/weegens-aaron/inspect-history/releases/latest/download/inspect-history.zip -o /tmp/inspect-history.zip && unzip -o /tmp/inspect-history.zip -d ~/.code_puppy/plugins/
+```
+
+**Windows (PowerShell)**
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/weegens-aaron/inspect-history/releases/latest/download/inspect-history.zip -OutFile $env:TEMP\inspect-history.zip; Expand-Archive -Force $env:TEMP\inspect-history.zip -DestinationPath ~\.code_puppy\plugins\
+```
+
+**Manual (any platform, no CLI)**
+
+1. Download **`inspect-history.zip`** from this release's assets below.
+2. Extract it into `~/.code_puppy/plugins/` (macOS/Linux) or `~\.code_puppy\plugins\` (Windows).
+
+The zip contains a single top-level `inspect_history/` folder, so you end up with
+`.../plugins/inspect_history/...` -- extract, don't nest. After installing,
+restart Code Puppy; the `/inspect` command (alias `/i`) is now available.
+NOTES
+# Inject the real version into the placeholder (kept literal in the heredoc).
+sed -i "s/__VERSION__/${VERSION}/g" "${RELEASE_NOTES}"
+echo "    wrote $(basename "${RELEASE_NOTES}") -- fill in 'What's changed', then publish with --notes-file"
+
 # --- 7. Self-check: extract to a temp dir and verify the package. -----------
 #        The full /inspect entry point needs code_puppy + prompt_toolkit, which
 #        may be absent in a bare CI shell. So we ALWAYS byte-compile every
@@ -204,7 +252,10 @@ ls -1 "${DIST_DIR}"
 
 # --- Release reminder: upload the zips AND their .sha256 sidecars as assets. -
 echo
-echo "==> To publish: upload BOTH the zips AND their .sha256 files, e.g."
+echo "==> To publish: fill in dist/RELEASE_NOTES.md, then upload BOTH the zips AND"
+echo "    their .sha256 files WITH the install-bearing notes, e.g."
 echo "      gh release create v${VERSION} \\"
-echo "        ${DIST_DIR}/inspect-history*.zip ${DIST_DIR}/inspect-history*.zip.sha256"
-echo "    (the .sha256 assets are what the README's verify step downloads)"
+echo "        ${DIST_DIR}/inspect-history*.zip ${DIST_DIR}/inspect-history*.zip.sha256 \\"
+echo "        --notes-file ${DIST_DIR}/RELEASE_NOTES.md"
+echo "    (notes ALWAYS carry install steps — the release page may be all a user sees;"
+echo "     the .sha256 assets are what the README's verify step downloads)"
