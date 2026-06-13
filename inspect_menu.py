@@ -31,17 +31,6 @@ from prompt_toolkit.widgets import Frame
 from .inspect_model import InspectEntry
 from .inspect_render import render_detail, render_list
 
-try:
-    from code_puppy.messaging import emit_info, emit_warning
-except ImportError:
-    # Fallback for testing without full code_puppy environment
-    def emit_info(msg: str) -> None:
-        print(f"[INFO] {msg}")
-
-    def emit_warning(msg: str) -> None:
-        print(f"[WARN] {msg}")
-
-
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding import KeyPressEvent
 
@@ -73,6 +62,13 @@ class InspectMenu:
         self.list_control: FormattedTextControl | None = None
         self.detail_control: FormattedTextControl | None = None
         self.footer_control: FormattedTextControl | None = None
+
+        # Transient status shown in the footer (e.g. copy result). It lives in
+        # the dedicated footer bar — NEVER printed to the terminal — so it can't
+        # punch through the alt-screen, stack up, or overlap the panes. Cleared
+        # on the next navigation so it never persists forever.
+        self._status_message: str | None = None
+        self._status_style: str = ""
 
     # ── entries ───────────────────────────────────────────────────────────
 
@@ -275,19 +271,33 @@ class InspectMenu:
             return False, f"Clipboard error: {e}"
 
     def _do_copy(self) -> None:
-        """Copy current message to clipboard."""
+        """Copy current message to clipboard and report via the footer status."""
         entry = self._current_entry()
         if entry is None:
-            emit_warning("No message selected to copy")
+            self._set_status("No message selected to copy", is_error=True)
             return
 
         text = self._format_entry_as_text(entry)
         success, message = self._copy_to_clipboard(text)
 
         if success:
-            emit_info(f"Copied message #{entry.history_index} to clipboard")
+            self._set_status(
+                f"Copied message #{entry.history_index} to clipboard",
+                is_error=False,
+            )
         else:
-            emit_warning(f"Copy failed: {message}")
+            self._set_status(f"Copy failed: {message}", is_error=True)
+
+    def _set_status(self, message: str, *, is_error: bool) -> None:
+        """Show a transient message in the footer status section and redraw.
+
+        Crucially this does NOT print to the terminal (that would corrupt the
+        alt-screen and stack up). It refreshes WITHOUT clearing the status so
+        the message survives this redraw; the next navigation clears it.
+        """
+        self._status_message = message
+        self._status_style = "fg:ansired" if is_error else "fg:ansigreen"
+        self._update_display(clear_status=False)
 
     # ── rendering ────────────────────────────────────────────────────────
 
@@ -312,10 +322,27 @@ class InspectMenu:
         # Exit
         hints.extend([(key, "q"), (dim, ":quit")])
 
+        # Transient status (e.g. copy result) lives at the end of this dedicated
+        # bar — it replaces any prior status (no stacking) and never overlaps
+        # the panes above.
+        if self._status_message:
+            hints.append(sep)
+            hints.append((self._status_style, self._status_message))
+
         return hints
 
-    def _update_display(self) -> None:
-        """Refresh both panes."""
+    def _update_display(self, *, clear_status: bool = True) -> None:
+        """Refresh both panes.
+
+        Args:
+            clear_status: When True (the default, used by every navigation
+                action), the transient footer status is dismissed first so it
+                never lingers forever. ``_set_status`` passes False so its
+                message survives the redraw it triggers.
+        """
+        if clear_status:
+            self._status_message = None
+
         self._scroll_list_into_view()
 
         if self.list_control:

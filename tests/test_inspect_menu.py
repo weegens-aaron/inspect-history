@@ -624,41 +624,50 @@ class TestCopyToClipboard:
 class TestDoCopy:
     """Test _do_copy method."""
 
-    @patch("inspect_history.inspect_menu.emit_warning")
-    def test_no_entry_selected(
-        self, mock_warning: MagicMock, menu: InspectMenu
-    ) -> None:
+    def test_no_entry_selected(self, menu: InspectMenu) -> None:
         # Force cursor out of range so no entry is selected
         menu.cursor = len(menu.entries) + 5
         menu._do_copy()
-        mock_warning.assert_called_once()
-        assert "no message" in mock_warning.call_args[0][0].lower()
+        assert menu._status_message is not None
+        assert "no message" in menu._status_message.lower()
+        assert menu._status_style == "fg:ansired"
 
-    @patch("inspect_history.inspect_menu.emit_info")
     @patch.object(InspectMenu, "_copy_to_clipboard", return_value=(True, "Copied"))
-    def test_success_emits_info(
+    def test_success_sets_status(
         self,
         mock_clipboard: MagicMock,
-        mock_info: MagicMock,
         menu: InspectMenu,
     ) -> None:
         menu._do_copy()
-        mock_info.assert_called_once()
-        assert "copied" in mock_info.call_args[0][0].lower()
+        assert menu._status_message is not None
+        assert "copied" in menu._status_message.lower()
+        assert menu._status_style == "fg:ansigreen"
 
-    @patch("inspect_history.inspect_menu.emit_warning")
     @patch.object(
         InspectMenu, "_copy_to_clipboard", return_value=(False, "xclip not found")
     )
-    def test_failure_emits_warning(
+    def test_failure_sets_status(
         self,
         mock_clipboard: MagicMock,
-        mock_warning: MagicMock,
         menu: InspectMenu,
     ) -> None:
         menu._do_copy()
-        mock_warning.assert_called_once()
-        assert "failed" in mock_warning.call_args[0][0].lower()
+        assert menu._status_message is not None
+        assert "failed" in menu._status_message.lower()
+        assert menu._status_style == "fg:ansired"
+
+    @patch.object(InspectMenu, "_copy_to_clipboard", return_value=(True, "Copied"))
+    def test_status_cleared_on_navigation(
+        self,
+        mock_clipboard: MagicMock,
+        menu: InspectMenu,
+    ) -> None:
+        # A copy sets a status; the next display refresh (as nav triggers)
+        # should dismiss it so it never persists forever / stacks up.
+        menu._do_copy()
+        assert menu._status_message is not None
+        menu._update_display()  # default clear_status=True, like a nav action
+        assert menu._status_message is None
 
 
 class TestCopyKeybinding:
