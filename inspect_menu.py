@@ -227,12 +227,20 @@ class InspectMenu:
         """
         system = platform.system()
 
+        # encoding: bytes we feed the clipboard helper on stdin. Windows'
+        # clip.exe reads UTF-16-LE, everyone else is happy with UTF-8.
+        encoding = "utf-8"
+
         if system == "Darwin":  # macOS
             cmd = ["pbcopy"]
             tool = "pbcopy"
         elif system == "Linux":
             cmd = ["xclip", "-selection", "clipboard"]
             tool = "xclip"
+        elif system == "Windows":
+            cmd = ["clip"]
+            tool = "clip"
+            encoding = "utf-16-le"
         else:
             return False, f"Clipboard not supported on {system}"
 
@@ -246,7 +254,7 @@ class InspectMenu:
                 # Bound the wait so a hung/blocked clipboard helper can never
                 # freeze the TUI. 5s is generous for a local pipe write.
                 _, stderr = process.communicate(
-                    input=text.encode("utf-8"), timeout=5
+                    input=text.encode(encoding), timeout=5
                 )
             except subprocess.TimeoutExpired:
                 # Kill and reap the stuck child so we don't leak a process.
@@ -429,8 +437,11 @@ class InspectMenu:
         # Measure terminal and calculate pane dimensions
         cols, rows = self._measure_terminal()
 
-        # Reserve space for chrome (frame borders, etc.)
-        usable_cols = max(40, cols - 8)
+        # Reserve space for chrome. Two side-by-side Frames in the VSplit cost
+        # exactly 4 columns of border (1 per side, per frame). Anything more and
+        # the (full_screen=False) app shrinks below the terminal, leaving dead
+        # space on the right edge.
+        usable_cols = max(40, cols - 4)
 
         # Left panel: ~35% of width, capped at 45 chars to maximize detail pane.
         # Minimum of 25 ensures index + role badge + some preview remains visible.
@@ -440,10 +451,14 @@ class InspectMenu:
         self._list_width = left_cols
         self._detail_width = right_cols
 
-        # Reserve lines for header/footer/indicators in list pane
-        # 13 lines for chrome: frame borders, footer bar, etc.
-        self._visible_rows = max(5, rows - 13)
-        self._detail_viewport_height = max(5, rows - 6)  # Detail has less chrome
+        # Reserve lines for chrome. The detail pane is what drives total app
+        # height: frame top+bottom border (2) + footer bar (1) = 3 rows. Reserve
+        # exactly that so the app fills the terminal with no dead space at the
+        # bottom edge.
+        self._detail_viewport_height = max(5, rows - 3)
+        # The list pane renders its own header + separator + scroll indicators +
+        # cursor line inside the frame (~6 lines), so it gets a bit less room.
+        self._visible_rows = max(5, rows - 9)
 
         list_width = Dimension(min=20, max=left_cols, preferred=left_cols)
         detail_width = Dimension(min=20, max=right_cols, preferred=right_cols)

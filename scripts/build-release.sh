@@ -71,6 +71,36 @@ read_version() {
   printf '%s\n' "${ver}"
 }
 
+# --- Cross-platform zip: prefer the `zip` CLI (-X strips extra attributes for
+#     a noise-free archive); fall back to Python's zipfile so the build also
+#     works where `zip` is absent (e.g. Git Bash on Windows ships unzip but not
+#     zip). PYTHON is already a hard build dependency (self-check), so the
+#     fallback adds no new requirement. Both paths produce an archive whose
+#     single top-level entry is the package dir, with forward-slash arcnames. -
+make_zip() {
+  local out="$1"  # absolute path to the output zip
+  local dir="$2"  # dir name to archive, relative to STAGING_DIR
+  (
+    cd "${STAGING_DIR}"
+    if command -v zip >/dev/null 2>&1; then
+      zip -X -r -q "${out}" "${dir}"
+    else
+      echo "    (no 'zip' CLI found — using Python zipfile fallback)"
+      "${PYTHON}" - "${out}" "${dir}" <<'PYZIP'
+import os, sys, zipfile
+
+out, root = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    for dirpath, _dirs, files in os.walk(root):
+        for name in sorted(files):
+            full = os.path.join(dirpath, name)
+            arc = os.path.relpath(full, ".").replace(os.sep, "/")
+            zf.write(full, arc)
+PYZIP
+    fi
+  )
+}
+
 # --- Cross-platform SHA256: macOS ships `shasum`, most Linux ships
 #     `sha256sum`. The checksum is written from inside dist/ so it references
 #     the BARE filename (what `shasum -a 256 -c` / `sha256sum -c` expect). ----
@@ -112,11 +142,7 @@ done
 
 # --- 4 & 5. Zip staging/ so the single top-level entry is inspect_history/. --
 echo "==> Building ${STABLE_ZIP}"
-(
-  cd "${STAGING_DIR}"
-  # -X strips extra file attributes (no .DS_Store-style noise); -r recursive.
-  zip -X -r -q "${STABLE_ZIP}" "${PKG_NAME}"
-)
+make_zip "${STABLE_ZIP}" "${PKG_NAME}"
 cp -f "${STABLE_ZIP}" "${VERSIONED_ZIP}"
 echo "    wrote $(basename "${STABLE_ZIP}") and $(basename "${VERSIONED_ZIP}")"
 

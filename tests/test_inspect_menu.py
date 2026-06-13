@@ -549,6 +549,27 @@ class TestCopyToClipboard:
         assert call_args[0][0] == ["xclip", "-selection", "clipboard"]
 
     @patch("platform.system", return_value="Windows")
+    @patch("subprocess.Popen")
+    def test_windows_uses_clip(
+        self, mock_popen: MagicMock, mock_system: MagicMock, menu: InspectMenu
+    ) -> None:
+        mock_process = MagicMock()
+        mock_process.communicate.return_value = (b"", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
+
+        success, message = menu._copy_to_clipboard("test text")
+
+        assert success is True
+        mock_popen.assert_called_once()
+        call_args = mock_popen.call_args
+        assert call_args[0][0] == ["clip"]
+        # clip.exe expects UTF-16-LE, not UTF-8.
+        assert mock_process.communicate.call_args.kwargs["input"] == (
+            "test text".encode("utf-16-le")
+        )
+
+    @patch("platform.system", return_value="Plan9")
     def test_unsupported_os(self, mock_system: MagicMock, menu: InspectMenu) -> None:
         success, message = menu._copy_to_clipboard("test text")
         assert success is False
