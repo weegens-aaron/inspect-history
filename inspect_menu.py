@@ -52,11 +52,16 @@ class InspectMenu:
         self.detail_scroll: int = 0
         self._detail_total_lines: int = 0
 
-        # Viewport dimensions — set in run() once terminal size is known
+        # Viewport dimensions — (re)computed by _recompute_dimensions() from the
+        # live terminal size, both at startup and on every resize.
         self._visible_rows: int = 20
         self._detail_viewport_height: int = 20
         self._list_width: int = 40
         self._detail_width: int = 60
+
+        # Last terminal size we laid out for. Used by the after_render hook to
+        # cheaply detect a resize and reflow without thrashing every frame.
+        self._last_size: tuple[int, int] | None = None
 
         # prompt_toolkit controls
         self.list_control: FormattedTextControl | None = None
@@ -453,16 +458,17 @@ class InspectMenu:
         except Exception:
             return 120, 40
 
-    # ── main entry ────────────────────────────────────────────────────────
+    def _recompute_dimensions(self) -> bool:
+        """Re-measure the terminal and recompute all pane dimensions.
 
-    def run(self) -> None:
-        """Launch the TUI and block until user exits."""
-        self.list_control = FormattedTextControl(text="")
-        self.detail_control = FormattedTextControl(text="")
-        self.footer_control = FormattedTextControl(text="")
-
-        # Measure terminal and calculate pane dimensions
+        Returns True if the terminal size changed since the last call (i.e. a
+        reflow is warranted), False otherwise. Called once at startup and again
+        from the after_render hook whenever the terminal is resized.
+        """
         cols, rows = self._measure_terminal()
+        if self._last_size == (cols, rows):
+            return False
+        self._last_size = (cols, rows)
 
         # Reserve space for chrome. Two side-by-side Frames in the VSplit cost
         # exactly 4 columns of border (1 per side, per frame). Anything more and
@@ -486,14 +492,38 @@ class InspectMenu:
         # The list pane renders its own header + separator + scroll indicators +
         # cursor line inside the frame (~6 lines), so it gets a bit less room.
         self._visible_rows = max(5, rows - 9)
+        return True
 
-        list_width = Dimension(min=20, max=left_cols, preferred=left_cols)
-        detail_width = Dimension(min=20, max=right_cols, preferred=right_cols)
-        detail_height = Dimension(
-            min=5,
-            max=self._detail_viewport_height,
-            preferred=self._detail_viewport_height,
-        )
+    # ── main entry ────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        """Launch the TUI and block until user exits."""
+        self.list_control = FormattedTextControl(text="")
+        self.detail_control = FormattedTextControl(text="")
+        self.footer_control = FormattedTextControl(text="")
+
+        # Measure terminal and calculate pane dimensions for the initial layout.
+        self._recompute_dimensions()
+
+        # Pane sizes are *callables* so they track the live terminal: when the
+        # window is resized, the after_render hook below updates self._*_width /
+        # height and these closures hand prompt_toolkit the fresh numbers on the
+        # very next render. (Fixed Dimension objects would freeze the layout at
+        # its startup size — which is exactly the resize bug we're killing.)
+        def list_width() -> Dimension:
+            return Dimension(min=20, max=self._list_width, preferred=self._list_width)
+
+        def detail_width() -> Dimension:
+            return Dimension(
+                min=20, max=self._detail_width, preferred=self._detail_width
+            )
+
+        def detail_height() -> Dimension:
+            return Dimension(
+                min=5,
+                max=self._detail_viewport_height,
+                preferred=self._detail_viewport_height,
+            )
 
         list_window = Window(
             content=self.list_control,
@@ -528,6 +558,20 @@ class InspectMenu:
             full_screen=False,
             mouse_support=False,
         )
+
+        # Responsive resize: prompt_toolkit already re-renders on SIGWINCH, but
+        # our pre-rendered pane *content* is laid out to a fixed width and won't
+        # reflow on its own. before_render fires ahead of layout sizing, so we
+        # recompute dimensions and re-render the panes to the new geometry in
+        # the SAME frame — the width/height callables then pick up the fresh
+        # numbers and everything stays consistent (no flicker, no extra render).
+        # The size guard in _recompute_dimensions() makes this a no-op when
+        # nothing moved, so there's no per-frame waste.
+        def _on_before_render(_app: Application[None]) -> None:
+            if self._recompute_dimensions():
+                self._update_display(clear_status=False)
+
+        app.before_render += _on_before_render
 
         # Signal to command runner that we're in interactive mode
         try:

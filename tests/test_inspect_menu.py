@@ -423,6 +423,47 @@ class TestTerminalMeasurement:
         assert rows == 40
 
 
+# -- responsive resize tests -------------------------------------------------
+
+
+class TestRecomputeDimensions:
+    """Lock in that the TUI tracks the live terminal size (resize bug)."""
+
+    def test_first_call_reports_change_and_sets_dims(
+        self, menu: InspectMenu
+    ) -> None:
+        with patch.object(menu, "_measure_terminal", return_value=(120, 40)):
+            changed = menu._recompute_dimensions()
+        assert changed is True
+        assert menu._last_size == (120, 40)
+        # Detail pane drives full height: rows - 3 chrome lines.
+        assert menu._detail_viewport_height == 37
+        assert menu._visible_rows == 31
+
+    def test_same_size_is_noop(self, menu: InspectMenu) -> None:
+        with patch.object(menu, "_measure_terminal", return_value=(100, 30)):
+            assert menu._recompute_dimensions() is True
+            # Second call at the same size must report no change (prevents a
+            # render loop in the after_render hook).
+            assert menu._recompute_dimensions() is False
+
+    def test_resize_updates_all_dimensions(self, menu: InspectMenu) -> None:
+        with patch.object(menu, "_measure_terminal", return_value=(80, 24)):
+            menu._recompute_dimensions()
+        small_rows = menu._visible_rows
+        small_detail_h = menu._detail_viewport_height
+        small_detail_w = menu._detail_width
+
+        with patch.object(menu, "_measure_terminal", return_value=(200, 60)):
+            changed = menu._recompute_dimensions()
+
+        assert changed is True
+        # Growing the terminal must grow every pane dimension.
+        assert menu._visible_rows > small_rows
+        assert menu._detail_viewport_height > small_detail_h
+        assert menu._detail_width > small_detail_w
+
+
 # -- page size tests ---------------------------------------------------------
 
 
