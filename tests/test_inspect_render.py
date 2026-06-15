@@ -13,9 +13,12 @@ from inspect_history.inspect_render import (
     render_row,
 )
 from inspect_history.inspect_render import (
+    _format_dict,
+    _style_detail_line,
     _wrap_detail_lines,
     _wrap_one_line,
 )
+from inspect_history.inspect_model import C_DIM, C_KEY, C_LABEL
 
 
 # -- fixtures ----------------------------------------------------------------
@@ -762,3 +765,74 @@ class TestDetailToPlainText:
 
         assert "analyze this problem" in expanded
         assert "chars collapsed" not in expanded
+
+
+# -- detail-pane styling (colour over dim) -----------------------------------
+
+
+class TestDetailStyling:
+    """Deep-dive tool favours colour; metadata must not be muted grey."""
+
+    def test_kv_splits_key_and_value(self):
+        """A 'key: value' line colours the key (C_KEY) and leaves value default."""
+        segs = _style_detail_line("  model: gpt-4o", "kv")
+        # key segment carries the colon and the cyan key colour...
+        assert segs[0] == (C_KEY, "  model:")
+        # ...value rides in the default foreground (NOT dimmed).
+        assert segs[1] == ("", " gpt-4o")
+        # Reassembled text is byte-identical to the input.
+        assert "".join(t for _, t in segs) == "  model: gpt-4o"
+
+    def test_value_is_not_dimmed(self):
+        """Regression: metadata values used to be C_DIM everywhere."""
+        segs = _style_detail_line("  model: gpt-4o", "kv")
+        assert all(style != C_DIM for style, _ in segs)
+
+    def test_label_is_bold_colour(self):
+        """Section labels (content:, args:) pop in C_LABEL, not dim."""
+        segs = _style_detail_line("    args:", "label")
+        assert segs == [(C_LABEL, "    args:")]
+
+    def test_content_with_colon_is_never_split(self):
+        """A line of code in the content body is NOT treated as key/value."""
+        line = "      def main(): return {'a': 1}"
+        segs = _style_detail_line(line, "content")
+        # Single default-styled segment — no cyan key carved out of code.
+        assert segs == [("", line)]
+
+    def test_wrapped_kv_continuation_stays_value(self):
+        """A continuation piece (no leading key) renders entirely as value."""
+        segs = _style_detail_line("  continuation text here", "kv")
+        assert segs == [("", "  continuation text here")]
+
+    def test_metadata_key_coloured_end_to_end(self, assistant_entry):
+        """render_detail emits the model key in C_KEY (colour, not dim)."""
+        result, _, _ = render_detail(
+            entry=assistant_entry, viewport_height=100, scroll_offset=0, width=0
+        )
+        key_styles = [style for style, text in result if text == "  model:"]
+        assert key_styles == [C_KEY]
+
+
+class TestToolArgPrettyPrint:
+    """Tool args should be pretty-printed, including embedded JSON strings."""
+
+    def test_json_string_value_is_expanded(self):
+        """A value that is a JSON object string gets expanded, not dumped raw."""
+        lines = _format_dict({"payload": '{"a": 1, "b": 2}'}, indent=2)
+        text = "\n".join(lines)
+        # Expanded into nested keys rather than one opaque blob.
+        assert "payload:" in text
+        assert "a: 1" in text
+        assert "b: 2" in text
+        assert '{"a": 1' not in text
+
+    def test_non_json_string_left_intact(self):
+        """A plain string value is untouched (no false-positive parsing)."""
+        lines = _format_dict({"file_path": "/test.py"}, indent=2)
+        assert lines == ["  file_path: /test.py"]
+
+    def test_numeric_string_not_expanded(self):
+        """Scalars that merely look numeric aren't unwrapped into junk."""
+        lines = _format_dict({"count": "123"}, indent=2)
+        assert lines == ["  count: 123"]

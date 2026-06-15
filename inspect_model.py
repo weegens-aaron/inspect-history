@@ -35,6 +35,13 @@ C_FOOTER = "fg:ansigreen"
 C_WARN = "fg:ansiyellow"
 C_ERROR = "fg:ansired"
 
+# Detail-pane semantics: this is a deep-dive tool, so favour COLOUR over dim.
+# Metadata keys get a distinct hue while their values render in the terminal's
+# default foreground (theme-safe, high-contrast) instead of muted grey. Section
+# labels (content:, args:, usage:) pop in bold so blocks are easy to scan.
+C_KEY = "fg:ansicyan"
+C_LABEL = "bold fg:ansicyan"
+
 
 # -- tool classification -----------------------------------------------------
 
@@ -688,6 +695,8 @@ __all__ = [
     "C_FILE",
     "C_FOOTER",
     "C_HEADER",
+    "C_KEY",
+    "C_LABEL",
     "C_RETRY",
     "C_SYSTEM",
     "C_THINKING",

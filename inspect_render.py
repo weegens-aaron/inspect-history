@@ -16,6 +16,7 @@ renderer slices visible lines and appends scroll indicators.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -23,7 +24,11 @@ from .inspect_model import (
     C_ASSISTANT,
     C_CURSOR,
     C_DIM,
+    C_FILE,
     C_HEADER,
+    C_KEY,
+    C_LABEL,
+    C_RETRY,
     C_SYSTEM,
     C_THINKING,
     C_TOOL,
@@ -42,6 +47,29 @@ FormattedText = list[tuple[str, str]]
 # Width constants
 LIST_PANE_MIN_WIDTH = 40
 DETAIL_PANE_MIN_WIDTH = 50
+
+# Detail-line semantic kinds. Every logical line the detail pane builds is
+# tagged with one of these AT BUILD TIME — where the structural context is
+# known — so styling never has to re-sniff prefixes or guess whether a colon
+# belongs to a metadata key or a line of code in the content body.
+K_BLANK = "blank"
+K_MSG_HEADER = "msg_header"  # === USER (request) ===
+K_RULE = "rule"  # decorative horizontal divider
+K_SECTION = "section"  # PARTS (n) title
+K_PART_HEADER = "part_header"  # [1/3] >>> tool-call: read_file
+K_LABEL = "label"  # content:, args:, usage: section labels
+K_KV = "kv"  # key: value metadata
+K_CONTENT = "content"  # verbatim content body (never restyled/split)
+
+# A detail row is (text, kind). render_part_detail() / _build_detail_lines()
+# expose just the text for the clipboard + back-compat; render_detail() uses
+# the kinds to colour each line.
+DetailRow = tuple[str, str]
+
+
+def _rows(kind: str, lines: list[str]) -> list[DetailRow]:
+    """Tag a batch of plain lines with a single semantic kind."""
+    return [(line, kind) for line in lines]
 
 
 # -- helper functions --------------------------------------------------------
@@ -146,27 +174,37 @@ def _wrap_detail_lines(lines: list[str], width: int) -> list[str]:
     Returns:
         A new list of lines, each no wider than ``width``.
     """
+    return [text for text, _ in _wrap_detail_rows([(ln, "") for ln in lines], width)]
+
+
+def _wrap_detail_rows(rows: list[DetailRow], width: int) -> list[DetailRow]:
+    """Wrap (text, kind) rows to ``width``, carrying each kind onto every piece.
+
+    Same lossless, indentation-preserving algorithm as _wrap_detail_lines (it
+    delegates here) — the only addition is that a wrapped line's semantic kind
+    rides along to all of its continuation pieces, so colouring survives a wrap.
+    """
     if width <= 0:
-        return lines
+        return rows
 
-    wrapped: list[str] = []
-    for line in lines:
-        if line == "":
-            wrapped.append("")
+    wrapped: list[DetailRow] = []
+    for text, kind in rows:
+        if text == "":
+            wrapped.append(("", kind))
             continue
-        if len(line) <= width:
-            wrapped.append(line)
+        if len(text) <= width:
+            wrapped.append((text, kind))
             continue
-        if _is_divider(line):
-            wrapped.append(line[:width])
+        if _is_divider(text):
+            wrapped.append((text[:width], kind))
             continue
 
-        indent = len(line) - len(line.lstrip(" "))
+        indent = len(text) - len(text.lstrip(" "))
         indent_str = " " * indent
-        body = line[indent:]
+        body = text[indent:]
         avail = max(1, width - indent)
         pieces = _wrap_one_line(body, avail)
-        wrapped.extend(indent_str + piece for piece in pieces)
+        wrapped.extend((indent_str + piece, kind) for piece in pieces)
     return wrapped
 
 
@@ -224,11 +262,37 @@ def _render_scroll_status(
     return [(C_DIM, text)]
 
 
+def _maybe_parse_json(value: object) -> object:
+    """Expand a JSON-encoded string into the real structure for pretty-printing.
+
+    Tool args frequently arrive as a *string* containing JSON (e.g. a nested
+    object serialized by the model). Showing that as one opaque blob defeats
+    the whole point of a deep inspector, so when a string clearly looks like a
+    JSON object/array we parse it and let _format_dict render it expanded.
+
+    Conservative by design: only strings that start with ``{`` or ``[`` are
+    even attempted, only dict/list results are unwrapped (scalars like
+    ``"123"`` are left untouched), and any parse error falls back to the
+    original value. Lossless either way — nothing is dropped.
+    """
+    if not isinstance(value, str):
+        return value
+    head = value.lstrip()[:1]
+    if head not in ("{", "["):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return value
+    return parsed if isinstance(parsed, (dict, list)) else value
+
+
 def _format_dict(d: dict, indent: int = 2) -> list[str]:
-    """Format a dict as indented YAML-like lines."""
+    """Format a dict as indented YAML-like lines (JSON-string values expanded)."""
     lines: list[str] = []
     prefix = " " * indent
     for key, value in d.items():
+        value = _maybe_parse_json(value)
         if isinstance(value, dict):
             lines.append(f"{prefix}{key}:")
             lines.extend(_format_dict(value, indent + 2))
@@ -396,29 +460,22 @@ def _get_part_marker(part_kind: str) -> str:
     return _PART_MARKERS.get(part_kind, "---")
 
 
-def render_part_detail(
+def _part_detail_rows(
     part: PartDetail,
     part_index: int,
     total_parts: int,
-) -> list[str]:
-    """Render a single part with all fields as plain text lines.
+) -> list[DetailRow]:
+    """Build a single part as (text, kind) rows.
 
-    Thinking blocks are always shown fully expanded.
-
-    Args:
-        part: The PartDetail to render
-        part_index: 0-based index of this part
-        total_parts: Total number of parts in the message
-
-    Returns:
-        List of plain text lines (no formatting — caller adds styles)
+    Thinking blocks are always shown fully expanded. Every line is tagged with
+    its semantic kind so render_detail() can colour it without re-parsing.
     """
-    lines: list[str] = []
+    rows: list[DetailRow] = []
 
     # Part divider (except for first part)
     if part_index > 0:
-        lines.append("─" * 35)
-        lines.append("")
+        rows.append(("─" * 35, K_RULE))
+        rows.append(("", K_BLANK))
 
     # Part header with marker: [1/3] >>> tool-call: read_file
     marker = _get_part_marker(part.part_kind)
@@ -430,8 +487,8 @@ def render_part_detail(
         part_header = f"{part_header} {tool_marker}"
     else:
         part_header = f"{part_num} {marker} {part.part_kind}"
-    lines.append(part_header)
-    lines.append("")  # Blank line after header for breathing room
+    rows.append((part_header, K_PART_HEADER))
+    rows.append(("", K_BLANK))  # Blank line after header for breathing room
 
     # Part metadata section (indented, grouped)
     metadata_lines: list[str] = []
@@ -449,120 +506,228 @@ def render_part_detail(
         metadata_lines.append(f"    provider: {part.provider_name}")
 
     if metadata_lines:
-        lines.extend(metadata_lines)
-        lines.append("")  # Blank line after metadata
+        rows.extend(_rows(K_KV, metadata_lines))
+        rows.append(("", K_BLANK))  # Blank line after metadata
 
     # Provider details (nested dict)
     if part.provider_details:
-        lines.append("    provider_details:")
-        lines.extend(_format_dict(part.provider_details, indent=6))
-        lines.append("")
+        rows.append(("    provider_details:", K_LABEL))
+        rows.extend(_rows(K_KV, _format_dict(part.provider_details, indent=6)))
+        rows.append(("", K_BLANK))
 
-    # Tool args (for tool-call parts) - formatted with clear indentation
+    # Tool args (for tool-call parts) - pretty-printed with clear indentation
     if part.tool_args:
-        lines.append("    args:")
-        lines.extend(_format_dict(part.tool_args, indent=6))
-        lines.append("")
+        rows.append(("    args:", K_LABEL))
+        rows.extend(_rows(K_KV, _format_dict(part.tool_args, indent=6)))
+        rows.append(("", K_BLANK))
 
-    # Content section — thinking blocks are always fully expanded
+    # Content section — thinking blocks are always fully expanded. Content is
+    # tagged K_CONTENT so it renders verbatim in the default foreground and is
+    # NEVER split on colons (a line of code is not a key/value pair).
     if part.content:
-        # Show full content with clear label
-        lines.append("    content:")
-        # Handle multi-line content with proper indentation
-        content_lines = part.content.split("\n")
-        for content_line in content_lines:
-            lines.append(f"      {content_line}")
+        rows.append(("    content:", K_LABEL))
+        for content_line in part.content.split("\n"):
+            rows.append((f"      {content_line}", K_CONTENT))
 
-    lines.append("")  # Blank line after part
-    return lines
+    rows.append(("", K_BLANK))  # Blank line after part
+    return rows
+
+
+def render_part_detail(
+    part: PartDetail,
+    part_index: int,
+    total_parts: int,
+) -> list[str]:
+    """Render a single part with all fields as plain text lines.
+
+    Thin wrapper over _part_detail_rows() that drops the semantic kinds — kept
+    for the clipboard path and as the public, test-facing API.
+    """
+    return [text for text, _ in _part_detail_rows(part, part_index, total_parts)]
 
 
 # -- detail pane rendering ---------------------------------------------------
 
 
-def _build_detail_lines(
+def _detail_rows(
     entry: InspectEntry,
-) -> list[str]:
-    """Build all detail lines for an entry as plain text.
+) -> list[DetailRow]:
+    """Build all detail (text, kind) rows for an entry.
 
-    This is separated from render_detail() to allow scroll calculation.
+    Separated from render_detail() so scroll math + wrapping run on the logical
+    lines, and so the kinds are assigned where structural context is known.
     """
-    lines: list[str] = []
+    rows: list[DetailRow] = []
 
     # === MESSAGE HEADER ===
     role_label = entry.role.upper()
-    header_line = f"=== {role_label} ({entry.kind}) ==="
-    lines.append(header_line)
-    lines.append("")  # Blank line after header
+    rows.append((f"=== {role_label} ({entry.kind}) ===", K_MSG_HEADER))
+    rows.append(("", K_BLANK))  # Blank line after header
 
     # --- Message Metadata ---
-    lines.append(f"  history index: {entry.history_index}")
-    lines.append(f"  parts: {len(entry.parts)}")
+    rows.append((f"  history index: {entry.history_index}", K_KV))
+    rows.append((f"  parts: {len(entry.parts)}", K_KV))
 
     if entry.timestamp:
-        lines.append(f"  timestamp: {_format_timestamp(entry.timestamp)}")
+        rows.append((f"  timestamp: {_format_timestamp(entry.timestamp)}", K_KV))
 
     # Response-specific metadata (grouped together)
     if entry.kind == "response":
-        lines.append("")  # Blank line before response details
+        rows.append(("", K_BLANK))  # Blank line before response details
         if entry.model_name:
-            lines.append(f"  model: {entry.model_name}")
+            rows.append((f"  model: {entry.model_name}", K_KV))
         if entry.provider_name:
-            lines.append(f"  provider: {entry.provider_name}")
+            rows.append((f"  provider: {entry.provider_name}", K_KV))
         if entry.provider_url:
-            lines.append(f"  provider_url: {entry.provider_url}")
+            rows.append((f"  provider_url: {entry.provider_url}", K_KV))
         if entry.provider_response_id:
-            lines.append(f"  response_id: {entry.provider_response_id}")
+            rows.append((f"  response_id: {entry.provider_response_id}", K_KV))
         if entry.finish_reason:
-            lines.append(f"  finish_reason: {entry.finish_reason}")
+            rows.append((f"  finish_reason: {entry.finish_reason}", K_KV))
 
         # Usage stats (on its own line for readability)
         if entry.usage:
-            lines.append("")  # Blank line before usage
+            rows.append(("", K_BLANK))  # Blank line before usage
             u = entry.usage
-            lines.append("  usage:")
-            lines.append(f"    input:  {_format_tokens(u.input_tokens)}")
-            lines.append(f"    output: {_format_tokens(u.output_tokens)}")
+            rows.append(("  usage:", K_LABEL))
+            rows.append((f"    input:  {_format_tokens(u.input_tokens)}", K_KV))
+            rows.append((f"    output: {_format_tokens(u.output_tokens)}", K_KV))
             if u.has_cache:
-                lines.append(f"    cache_read:  {_format_tokens(u.cache_read_tokens)}")
-                lines.append(f"    cache_write: {_format_tokens(u.cache_write_tokens)}")
+                rows.append(
+                    (f"    cache_read:  {_format_tokens(u.cache_read_tokens)}", K_KV)
+                )
+                rows.append(
+                    (f"    cache_write: {_format_tokens(u.cache_write_tokens)}", K_KV)
+                )
             if u.has_audio:
-                lines.append(f"    audio_in:  {_format_tokens(u.input_audio_tokens)}")
-                lines.append(f"    audio_out: {_format_tokens(u.output_audio_tokens)}")
+                rows.append(
+                    (f"    audio_in:  {_format_tokens(u.input_audio_tokens)}", K_KV)
+                )
+                rows.append(
+                    (f"    audio_out: {_format_tokens(u.output_audio_tokens)}", K_KV)
+                )
 
     # Request-specific metadata
     if entry.kind == "request":
         if entry.instructions:
-            lines.append("")  # Blank line before instructions
-            lines.append(f"  instructions: {entry.instructions}")
+            rows.append(("", K_BLANK))  # Blank line before instructions
+            rows.append((f"  instructions: {entry.instructions}", K_KV))
 
     if entry.run_id:
-        lines.append("")  # Blank line before run_id
-        lines.append(f"  run_id: {entry.run_id}")
+        rows.append(("", K_BLANK))  # Blank line before run_id
+        rows.append((f"  run_id: {entry.run_id}", K_KV))
 
     if entry.metadata:
-        lines.append("")  # Blank line before metadata dict
-        lines.append("  metadata:")
-        lines.extend(_format_dict(entry.metadata, indent=4))
+        rows.append(("", K_BLANK))  # Blank line before metadata dict
+        rows.append(("  metadata:", K_LABEL))
+        rows.extend(_rows(K_KV, _format_dict(entry.metadata, indent=4)))
 
     if entry.provider_details:
-        lines.append("")  # Blank line before provider_details
-        lines.append("  provider_details:")
-        lines.extend(_format_dict(entry.provider_details, indent=4))
+        rows.append(("", K_BLANK))  # Blank line before provider_details
+        rows.append(("  provider_details:", K_LABEL))
+        rows.extend(_rows(K_KV, _format_dict(entry.provider_details, indent=4)))
 
     # === PARTS SECTION ===
-    lines.append("")  # Blank line before parts divider
-    lines.append("=" * 50)
-    lines.append(f"  PARTS ({len(entry.parts)})")
-    lines.append("=" * 50)
-    lines.append("")  # Blank line after parts header
+    rows.append(("", K_BLANK))  # Blank line before parts divider
+    rows.append(("=" * 50, K_RULE))
+    rows.append((f"  PARTS ({len(entry.parts)})", K_SECTION))
+    rows.append(("=" * 50, K_RULE))
+    rows.append(("", K_BLANK))  # Blank line after parts header
 
     # Render each part
     for i, part in enumerate(entry.parts):
-        part_lines = render_part_detail(part, i, len(entry.parts))
-        lines.extend(part_lines)
+        rows.extend(_part_detail_rows(part, i, len(entry.parts)))
 
-    return lines
+    return rows
+
+
+def _build_detail_lines(
+    entry: InspectEntry,
+) -> list[str]:
+    """Plain-text view of the detail rows (clipboard + back-compat API)."""
+    return [text for text, _ in _detail_rows(entry)]
+
+
+# Role-header colours, longest-prefix-first so "=== TOOL-RETURN" never matches
+# a shorter prefix by accident.
+_MSG_HEADER_STYLES: tuple[tuple[str, str], ...] = (
+    ("=== SYSTEM", C_SYSTEM),
+    ("=== USER", C_USER),
+    ("=== ASSISTANT", C_ASSISTANT),
+    ("=== TOOL-RETURN", C_TOOL_RETURN),
+)
+
+# Part-header colours keyed by the part-kind substring. Order matters: the
+# tool-call/return checks come before "text" so a tool literally named
+# "...text..." can't steal the assistant colour.
+_PART_HEADER_STYLES: tuple[tuple[str, str], ...] = (
+    ("tool-call", C_TOOL),
+    ("builtin-tool-call", C_TOOL),
+    ("tool-return", C_TOOL_RETURN),
+    ("builtin-tool-return", C_TOOL_RETURN),
+    ("thinking", C_THINKING),
+    ("system-prompt", C_SYSTEM),
+    ("user-prompt", C_USER),
+    ("retry-prompt", C_RETRY),
+    ("file", C_FILE),
+    ("text", C_ASSISTANT),
+)
+
+
+def _msg_header_style(text: str) -> str:
+    for prefix, style in _MSG_HEADER_STYLES:
+        if text.startswith(prefix):
+            return style
+    return "bold"
+
+
+def _part_header_style(text: str) -> str:
+    for needle, style in _PART_HEADER_STYLES:
+        if needle in text:
+            return style
+    return "bold"
+
+
+def _style_kv(text: str) -> FormattedText:
+    """Colour a ``key: value`` line: key in C_KEY, value in the default fg.
+
+    Default-foreground values are deliberate — bright and theme-safe, the
+    opposite of the old muted-grey-everything look. If the line has no usable
+    colon (e.g. a wrapped continuation piece) the whole thing renders as a
+    value so nothing turns cyan by accident.
+    """
+    indent = len(text) - len(text.lstrip(" "))
+    body = text[indent:]
+    colon = body.find(":")
+    if colon <= 0:
+        return [("", text)]
+    key = body[:colon]
+    value = body[colon + 1 :]  # keeps its own leading space
+    return [(C_KEY, " " * indent + key + ":"), ("", value)]
+
+
+def _style_detail_line(text: str, kind: str) -> FormattedText:
+    """Map one (text, kind) detail row to styled formatted-text segments.
+
+    Returns segments WITHOUT a trailing newline so the caller controls line
+    breaks (and the 1-logical-line == 1-visual-line scroll invariant holds).
+    """
+    if kind == K_BLANK or text == "":
+        return [("", "")]
+    if kind == K_MSG_HEADER:
+        return [(_msg_header_style(text), text)]
+    if kind == K_RULE:
+        return [(C_DIM, text)]
+    if kind == K_SECTION:
+        return [(C_LABEL, text)]
+    if kind == K_PART_HEADER:
+        return [(_part_header_style(text), text)]
+    if kind == K_LABEL:
+        return [(C_LABEL, text)]
+    if kind == K_KV:
+        return _style_kv(text)
+    # K_CONTENT and anything else: verbatim, default foreground, never split.
+    return [("", text)]
 
 
 def render_detail(
@@ -593,10 +758,11 @@ def render_detail(
         result.append((C_DIM, "(no message selected)"))
         return result, 0, 0
 
-    # Build all lines, then wrap them to the pane width so 1 logical line
-    # maps to exactly 1 rendered line (keeps scroll math honest).
-    all_lines = _wrap_detail_lines(_build_detail_lines(entry), width)
-    total_lines = len(all_lines)
+    # Build tagged rows, then wrap them to the pane width so 1 logical line
+    # maps to exactly 1 rendered line (keeps scroll math honest). The kind
+    # rides along through the wrap so colouring survives a line break.
+    all_rows = _wrap_detail_rows(_detail_rows(entry), width)
+    total_lines = len(all_rows)
 
     # Reserve the last viewport row for the persistent scroll-status line so it
     # is ALWAYS visible (top marker, position, end-of-message banner). Content
@@ -610,72 +776,11 @@ def render_detail(
 
     # Slice viewport
     end_offset = scroll_offset + content_height
-    visible_lines = all_lines[scroll_offset:end_offset]
+    visible_rows = all_rows[scroll_offset:end_offset]
 
-    # Style mapping based on line content
-    for line in visible_lines:
-        style = ""
-
-        # === HEADER LINES (role headers) ===
-        if line.startswith("=== SYSTEM"):
-            style = C_SYSTEM
-        elif line.startswith("=== USER"):
-            style = C_USER
-        elif line.startswith("=== ASSISTANT"):
-            style = C_ASSISTANT
-        elif line.startswith("=== TOOL-RETURN"):
-            style = C_TOOL_RETURN
-        elif line.startswith("===") or line == "=" * 50:
-            # Parts section divider
-            style = C_DIM
-        elif line.strip().startswith("PARTS ("):
-            # Parts count header
-            style = "bold"
-
-        # === PART HEADERS (with markers) ===
-        elif line.startswith("[") and "/" in line[:10]:
-            # Part header like "[1/3] >>> tool-call"
-            if "tool-call" in line or "builtin-tool-call" in line:
-                style = C_TOOL
-            elif "tool-return" in line or "builtin-tool-return" in line:
-                style = C_TOOL_RETURN
-            elif "thinking" in line:
-                style = C_THINKING
-            elif "system-prompt" in line:
-                style = C_SYSTEM
-            elif "user-prompt" in line:
-                style = C_USER
-            elif "text" in line:
-                style = C_ASSISTANT
-            elif "retry-prompt" in line:
-                style = "fg:ansired"
-            elif "file" in line:
-                style = "fg:ansiwhite"
-            else:
-                style = "bold"
-
-        # === DIVIDERS (horizontal lines) ===
-        elif (
-            line.startswith("---")
-            or line.startswith("===" * 3)
-            or line.startswith("─" * 10)
-        ):
-            style = C_DIM
-
-        # === METADATA LINES (indented key: value) ===
-        elif line.startswith("  ") and ":" in line[:30]:
-            # Indented metadata
-            style = C_DIM
-        elif line.startswith("    ") and ":" in line[:35]:
-            # Deeper indented metadata (args, content label)
-            style = C_DIM
-
-        # === CONTENT LINES (indented content values) ===
-        elif line.startswith("      "):
-            # Content text - keep default style for readability
-            style = ""
-
-        result.append((style, line))
+    # Colour each line by its semantic kind (assigned at build time).
+    for text, kind in visible_rows:
+        result.extend(_style_detail_line(text, kind))
         result.append(("", "\n"))
 
     # Persistent scroll/position status line — always shown so the user knows
