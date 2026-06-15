@@ -174,7 +174,7 @@ def _wrap_detail_lines(lines: list[str], width: int) -> list[str]:
     Returns:
         A new list of lines, each no wider than ``width``.
     """
-    return [text for text, _ in _wrap_detail_rows([(ln, "") for ln in lines], width)]
+    return [text for text, _ in _wrap_detail_rows([(ln, K_CONTENT) for ln in lines], width)]
 
 
 def _wrap_detail_rows(rows: list[DetailRow], width: int) -> list[DetailRow]:
@@ -287,21 +287,39 @@ def _maybe_parse_json(value: object) -> object:
     return parsed if isinstance(parsed, (dict, list)) else value
 
 
-def _format_dict(d: dict, indent: int = 2) -> list[str]:
-    """Format a dict as indented YAML-like lines (JSON-string values expanded)."""
+def _format_dict(
+    d: dict, indent: int = 2, _depth: int = 0, max_depth: int = 20
+) -> list[str]:
+    """Format a dict as indented YAML-like lines (JSON-string values expanded).
+
+    Recursion is capped at *max_depth*. Tool arguments -- and the JSON we expand
+    out of them via _maybe_parse_json -- are external, attacker-influenceable
+    data; a pathologically deep payload would otherwise recurse until Python
+    raises RecursionError and takes the inspector down. Past the cap we render a
+    collapsed placeholder ({...} / [...]) instead of descending further: lossy
+    only for absurd depth, and never a crash.
+    """
     lines: list[str] = []
     prefix = " " * indent
     for key, value in d.items():
         value = _maybe_parse_json(value)
         if isinstance(value, dict):
+            if _depth >= max_depth:
+                lines.append(f"{prefix}{key}: {{...}}")
+                continue
             lines.append(f"{prefix}{key}:")
-            lines.extend(_format_dict(value, indent + 2))
+            lines.extend(_format_dict(value, indent + 2, _depth + 1, max_depth))
         elif isinstance(value, list):
+            if _depth >= max_depth:
+                lines.append(f"{prefix}{key}: [...]")
+                continue
             lines.append(f"{prefix}{key}:")
             for item in value:
                 if isinstance(item, dict):
                     lines.append(f"{prefix}  -")
-                    lines.extend(_format_dict(item, indent + 4))
+                    lines.extend(
+                        _format_dict(item, indent + 4, _depth + 1, max_depth)
+                    )
                 else:
                     lines.append(f"{prefix}  - {item}")
         elif isinstance(value, str) and "\n" in value:
@@ -699,10 +717,16 @@ def _style_kv(text: str) -> FormattedText:
     indent = len(text) - len(text.lstrip(" "))
     body = text[indent:]
     colon = body.find(":")
-    if colon <= 0:
+    value = body[colon + 1 :]  # keeps its own leading space
+    # Only treat this as a real key:value line when the colon is immediately
+    # followed by a space or end-of-line -- exactly how every metadata row and
+    # _format_dict line is emitted ("key: value", "key:", "key: |"). This
+    # rejects colons that live *inside* a value -- URLs (https://...),
+    # timestamps (12:34:56) -- which can otherwise surface on a wrapped K_KV
+    # continuation piece and mis-colour part of the value as a key.
+    if colon <= 0 or (value and not value.startswith(" ")):
         return [("", text)]
     key = body[:colon]
-    value = body[colon + 1 :]  # keeps its own leading space
     return [(C_KEY, " " * indent + key + ":"), ("", value)]
 
 

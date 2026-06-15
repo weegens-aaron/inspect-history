@@ -805,6 +805,27 @@ class TestDetailStyling:
         segs = _style_detail_line("  continuation text here", "kv")
         assert segs == [("", "  continuation text here")]
 
+    def test_kv_url_value_not_missplit(self):
+        """A wrapped K_KV piece that is a bare URL must not colour 'https' as key.
+
+        The colon in 'https://' is followed by '/', not a space, so it is part
+        of the value -- the whole line stays default-styled.
+        """
+        segs = _style_detail_line("  https://api.example.com/v1", "kv")
+        assert segs == [("", "  https://api.example.com/v1")]
+
+    def test_kv_timestamp_value_not_missplit(self):
+        """An embedded clock time (12:34:56) is not a key separator."""
+        segs = _style_detail_line("  12:34:56", "kv")
+        assert segs == [("", "  12:34:56")]
+
+    def test_kv_real_key_still_splits(self):
+        """Regression guard: a genuine 'key: value' still colours the key."""
+        segs = _style_detail_line("  provider_url: https://api.example.com", "kv")
+        assert segs[0] == (C_KEY, "  provider_url:")
+        assert segs[1] == ("", " https://api.example.com")
+        assert "".join(t for _, t in segs) == "  provider_url: https://api.example.com"
+
     def test_metadata_key_coloured_end_to_end(self, assistant_entry):
         """render_detail emits the model key in C_KEY (colour, not dim)."""
         result, _, _ = render_detail(
@@ -831,6 +852,25 @@ class TestToolArgPrettyPrint:
         """A plain string value is untouched (no false-positive parsing)."""
         lines = _format_dict({"file_path": "/test.py"}, indent=2)
         assert lines == ["  file_path: /test.py"]
+
+    def test_deeply_nested_json_is_capped_not_crashed(self):
+        """Pathologically deep nesting hits the depth cap, never RecursionError."""
+        # Build a dict nested far deeper than max_depth (20).
+        deep: dict = {"leaf": 1}
+        for _ in range(60):
+            deep = {"n": deep}
+        lines = _format_dict(deep, indent=2, max_depth=20)  # must not raise
+        text = "\n".join(lines)
+        # The cap emits a collapsed placeholder instead of descending forever.
+        assert "{...}" in text
+
+    def test_deeply_nested_list_is_capped(self):
+        """A deep list-of-dicts also stops at the cap with a [...] placeholder."""
+        deep: dict = {"items": [{"leaf": 1}]}
+        for _ in range(60):
+            deep = {"items": [deep]}
+        lines = _format_dict(deep, indent=2, max_depth=20)  # must not raise
+        assert any("[...]" in ln for ln in lines)
 
     def test_numeric_string_not_expanded(self):
         """Scalars that merely look numeric aren't unwrapped into junk."""
