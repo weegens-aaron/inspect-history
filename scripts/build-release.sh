@@ -197,7 +197,10 @@ The zip contains a single top-level `inspect_history/` folder, so you end up wit
 restart Code Puppy; the `/inspect` command (alias `/i`) is now available.
 NOTES
 # Inject the real version into the placeholder (kept literal in the heredoc).
-sed -i "s/__VERSION__/${VERSION}/g" "${RELEASE_NOTES}"
+# Portable in-place edit: BSD sed (macOS) and GNU sed (Linux) disagree on the
+# `sed -i` syntax, so write through a temp file instead of relying on `-i`.
+sed "s/__VERSION__/${VERSION}/g" "${RELEASE_NOTES}" > "${RELEASE_NOTES}.tmp"
+mv -f "${RELEASE_NOTES}.tmp" "${RELEASE_NOTES}"
 echo "    wrote $(basename "${RELEASE_NOTES}") -- fill in 'What's changed', then publish with --notes-file"
 
 # --- 7. Self-check: extract to a temp dir and verify the package. -----------
